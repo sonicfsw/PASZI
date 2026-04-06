@@ -1,0 +1,4 @@
+psutil>=5.9.0
+scapy>=2.5.0
+PyQt5>=5.15.0</content>
+<parameter name="filePath">/Users/sonic_fsw/Documents/PASZI/network_monitor/requirements.txt
