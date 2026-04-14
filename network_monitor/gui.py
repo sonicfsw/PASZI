@@ -24,6 +24,7 @@ class MainWindow(QMainWindow):
         self.logger = EventLogger()
         self.init_ui()
         self.setup_timers()
+        self.refresh_blocked_entries()
 
     def init_ui(self):
         self.setWindowTitle("Система мониторинга и блокирования сетевых соединений")
@@ -58,6 +59,11 @@ class MainWindow(QMainWindow):
         self.setup_settings_tab()
         self.tabs.addTab(self.settings_tab, "Параметры")
 
+        # Вкладка блокировок
+        self.blocked_tab = QWidget()
+        self.setup_blocked_tab()
+        self.tabs.addTab(self.blocked_tab, "Заблокированные")
+
         # Отображение журнала
         self.log_display = QTextEdit()
         self.log_display.setMaximumHeight(150)
@@ -71,7 +77,7 @@ class MainWindow(QMainWindow):
         # Элементы управления
         controls_layout = QHBoxLayout()
         refresh_btn = QPushButton("Обновить")
-        refresh_btn.clicked.connect(self.refresh_active_connections)
+        refresh_btn.clicked.connect(lambda: self.refresh_active_connections(manual=True))
         controls_layout.addWidget(refresh_btn)
 
         self.auto_refresh_cb = QCheckBox("Автообновление (5 сек)")
@@ -105,13 +111,48 @@ class MainWindow(QMainWindow):
         controls_layout.addStretch()
         layout.addLayout(controls_layout)
 
+        # Ручная блокировка по URL/домену
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("URL или домен:"))
+        self.url_block_edit = QLineEdit("")
+        self.url_block_edit.setPlaceholderText("example.com или https://example.com")
+        url_layout.addWidget(self.url_block_edit)
+
+        block_url_btn = QPushButton("Заблокировать URL")
+        block_url_btn.clicked.connect(self.block_url)
+        url_layout.addWidget(block_url_btn)
+        layout.addLayout(url_layout)
+
         # Таблица
         self.suspicious_table = QTableWidget()
-        self.suspicious_table.setColumnCount(7)
+        self.suspicious_table.setColumnCount(8)
         self.suspicious_table.setHorizontalHeaderLabels([
-            "Локальный адрес", "Удалённый адрес", "Статус", "PID", "Имя процесса", "Протокол", "Причина"
+            "Локальный адрес", "Удалённый адрес", "Домен (rDNS)", "Статус",
+            "PID", "Имя процесса", "Протокол", "Причина"
         ])
         layout.addWidget(self.suspicious_table)
+
+    def setup_blocked_tab(self):
+        layout = QVBoxLayout(self.blocked_tab)
+
+        controls_layout = QHBoxLayout()
+        refresh_btn = QPushButton("Обновить список")
+        refresh_btn.clicked.connect(self.refresh_blocked_entries)
+        controls_layout.addWidget(refresh_btn)
+
+        unblock_btn = QPushButton("Разблокировать выбранное")
+        unblock_btn.clicked.connect(self.unblock_selected_entries)
+        controls_layout.addWidget(unblock_btn)
+
+        controls_layout.addStretch()
+        layout.addLayout(controls_layout)
+
+        self.blocked_table = QTableWidget()
+        self.blocked_table.setColumnCount(6)
+        self.blocked_table.setHorizontalHeaderLabels([
+            "ID", "Тип", "Источник", "IP", "Порт", "Правило"
+        ])
+        layout.addWidget(self.blocked_table)
 
     def setup_processes_tab(self):
         layout = QVBoxLayout(self.processes_tab)
@@ -119,7 +160,7 @@ class MainWindow(QMainWindow):
         # Элементы управления
         controls_layout = QHBoxLayout()
         refresh_btn = QPushButton("Обновить")
-        refresh_btn.clicked.connect(self.refresh_processes)
+        refresh_btn.clicked.connect(lambda: self.refresh_processes(manual=True))
         controls_layout.addWidget(refresh_btn)
 
         self.auto_refresh_proc_cb = QCheckBox("Автообновление (10 сек)")
@@ -187,8 +228,8 @@ class MainWindow(QMainWindow):
         self.monitor_timer.timeout.connect(self.check_suspicious)
         self.monitor_timer.start(1000)  # 1 секунда
 
-    def refresh_active_connections(self):
-        if not self.auto_refresh_cb.isChecked():
+    def refresh_active_connections(self, manual=False):
+        if not manual and not self.auto_refresh_cb.isChecked():
             return
         try:
             connections = self.monitor.get_active_connections()
@@ -200,11 +241,13 @@ class MainWindow(QMainWindow):
                 self.active_table.setItem(row, 3, QTableWidgetItem(str(conn.get('pid', ''))))
                 self.active_table.setItem(row, 4, QTableWidgetItem(conn.get('process_name', '')))
                 self.active_table.setItem(row, 5, QTableWidgetItem(conn.get('type', '')))
+            if manual:
+                self.log_display.append("Активные подключения обновлены")
         except Exception as e:
             self.log_display.append("ОШИБКА: Нет доступа к информации о соединениях. Запустите приложение с правами администратора (sudo).")
 
-    def refresh_processes(self):
-        if not self.auto_refresh_proc_cb.isChecked():
+    def refresh_processes(self, manual=False):
+        if not manual and not self.auto_refresh_proc_cb.isChecked():
             return
         try:
             processes = self.monitor.get_processes_with_network()
@@ -214,6 +257,8 @@ class MainWindow(QMainWindow):
                 self.processes_table.setItem(row, 1, QTableWidgetItem(proc['name']))
                 self.processes_table.setItem(row, 2, QTableWidgetItem("{:.1f}".format(proc['cpu_percent'])))
                 self.processes_table.setItem(row, 3, QTableWidgetItem("{:.1f}".format(proc['memory_percent'])))
+            if manual:
+                self.log_display.append("Список процессов обновлен")
         except Exception as e:
             self.log_display.append("ОШИБКА: Нет доступа к информации о процессах. Запустите приложение с правами администратора (sudo).")
 
@@ -224,17 +269,22 @@ class MainWindow(QMainWindow):
             for row, conn in enumerate(suspicious):
                 self.suspicious_table.setItem(row, 0, QTableWidgetItem(conn.get('local_addr', '')))
                 self.suspicious_table.setItem(row, 1, QTableWidgetItem(conn.get('remote_addr', '')))
-                self.suspicious_table.setItem(row, 2, QTableWidgetItem(conn.get('status', '')))
-                self.suspicious_table.setItem(row, 3, QTableWidgetItem(str(conn.get('pid', ''))))
-                self.suspicious_table.setItem(row, 4, QTableWidgetItem(conn.get('process_name', '')))
-                self.suspicious_table.setItem(row, 5, QTableWidgetItem(conn.get('type', '')))
-                self.suspicious_table.setItem(row, 6, QTableWidgetItem(conn.get('reason', '')))
+                self.suspicious_table.setItem(row, 2, QTableWidgetItem(conn.get('remote_domain', '')))
+                self.suspicious_table.setItem(row, 3, QTableWidgetItem(conn.get('status', '')))
+                self.suspicious_table.setItem(row, 4, QTableWidgetItem(str(conn.get('pid', ''))))
+                self.suspicious_table.setItem(row, 5, QTableWidgetItem(conn.get('process_name', '')))
+                self.suspicious_table.setItem(row, 6, QTableWidgetItem(conn.get('type', '')))
+                self.suspicious_table.setItem(row, 7, QTableWidgetItem(conn.get('reason', '')))
 
             if self.auto_block_cb.isChecked() and suspicious:
                 for conn in suspicious:
-                    self.blocker.block_connection(conn)
-                    self.logger.log_event("Автоматически блокировано подозрительное соединение: {}".format(conn))
-        except Exception as e:
+                    entry = self.blocker.block_connection(conn)
+                    if entry:
+                        message = "Автоматически блокировано подозрительное соединение: {}".format(conn)
+                        self.logger.log_event(message)
+                        self.log_display.append(message)
+                self.refresh_blocked_entries()
+        except Exception:
             pass  # Молчаливый отказ, чтобы избежать избыточных сообщений об ошибках
 
     def block_selected_suspicious(self):
@@ -246,24 +296,94 @@ class MainWindow(QMainWindow):
             # Получаем информацию о соединении из таблицы
             local = self.suspicious_table.item(row, 0).text()
             remote = self.suspicious_table.item(row, 1).text()
-            pid = int(self.suspicious_table.item(row, 3).text())
+            pid_text = self.suspicious_table.item(row, 4).text()
+            pid = int(pid_text) if pid_text.isdigit() else None
             conn = {'local_addr': local, 'remote_addr': remote, 'pid': pid}
-            self.blocker.block_connection(conn)
-            self.logger.log_event("Вручную заблокировано соединение: {}".format(conn))
+            entry = self.blocker.block_connection(conn)
+            if entry:
+                message = "Вручную заблокировано соединение: {}".format(conn)
+                self.logger.log_event(message)
+                self.log_display.append(message)
+            else:
+                self.log_display.append("Блокировка уже существует или адрес некорректен: {}".format(remote))
+        self.refresh_blocked_entries()
 
     def allow_selected_suspicious(self):
-        # Просто удаляем выбранные строки из таблицы подозрительных соединений
+        # Разблокируем выбранные соединения и удаляем их из списка подозрительных
         selected_rows = sorted(set(item.row() for item in self.suspicious_table.selectedItems()), reverse=True)
         for row in selected_rows:
+            remote = self.suspicious_table.item(row, 1).text()
+            self.blocker.unblock_connection({'remote_addr': remote})
             self.suspicious_table.removeRow(row)
+            message = "Выбранное подозрительное соединение разблокировано/разрешено: {}".format(remote)
+            self.logger.log_event(message)
+            self.log_display.append(message)
+        self.refresh_blocked_entries()
+
+    def block_url(self):
+        source = self.url_block_edit.text().strip()
+        if not source:
+            self.log_display.append("Введите URL или домен для блокировки.")
+            return
+
+        entries, error = self.blocker.block_url(source)
+        if entries:
+            message = "Заблокировано по URL '{}': {} адрес(ов)".format(source, len(entries))
+            self.logger.log_event(message)
+            self.log_display.append(message)
+        if error:
+            self.log_display.append("ОШИБКА блокировки URL '{}': {}".format(source, error))
+        if not entries and not error:
+            self.log_display.append("Для '{}' новых блокировок не добавлено.".format(source))
+
+        self.refresh_blocked_entries()
+
+    def refresh_blocked_entries(self):
+        entries = self.blocker.get_blocked_entries()
+        self.blocked_table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            self.blocked_table.setItem(row, 0, QTableWidgetItem(str(entry.get('id', ''))))
+            self.blocked_table.setItem(row, 1, QTableWidgetItem(entry.get('source', '')))
+            self.blocked_table.setItem(row, 2, QTableWidgetItem(entry.get('source_value', '')))
+            self.blocked_table.setItem(row, 3, QTableWidgetItem(entry.get('ip', '')))
+            port = entry.get('port')
+            self.blocked_table.setItem(row, 4, QTableWidgetItem("" if port is None else str(port)))
+            self.blocked_table.setItem(row, 5, QTableWidgetItem(entry.get('rule', '')))
+
+    def unblock_selected_entries(self):
+        selected_rows = sorted(set(item.row() for item in self.blocked_table.selectedItems()), reverse=True)
+        if not selected_rows:
+            self.log_display.append("Выберите записи в таблице 'Заблокированные'.")
+            return
+
+        for row in selected_rows:
+            id_item = self.blocked_table.item(row, 0)
+            if not id_item:
+                continue
+            text = id_item.text().strip()
+            if not text.isdigit():
+                continue
+            block_id = int(text)
+            ok, error = self.blocker.unblock_by_id(block_id)
+            if ok:
+                message = "Снята блокировка ID={}".format(block_id)
+                self.logger.log_event(message)
+                self.log_display.append(message)
+            else:
+                self.log_display.append(error)
+        self.refresh_blocked_entries()
 
     def save_settings(self):
-        # Сохраняем параметры конфигурации (пока просто выводим)
+        # Сохраняем параметры конфигурации
         ports = self.suspicious_ports_edit.text()
         ips = self.suspicious_ips_edit.text()
         auto_block = self.auto_block_cb.isChecked()
         self.monitor.update_rules(ports.split(','), ips.split(','))
-        self.logger.log_event("Параметры обновлены: порты={}, IP={}, автоблокировка={}".format(ports, ips, auto_block))
+        message = "Параметры обновлены: порты={}, IP={}, автоблокировка={}".format(ports, ips, auto_block)
+        self.logger.log_event(message)
+        self.log_display.append(message)
+        self.check_suspicious()
+        self.refresh_blocked_entries()
 
     def closeEvent(self, event):
         self.active_timer.stop()

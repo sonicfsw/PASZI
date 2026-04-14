@@ -27,8 +27,10 @@ This is a Python-based system for monitoring and blocking network connections on
 
 2. Run the application:
    ```bash
-   python main.py
+   sudo python3 main.py
    ```
+
+> На macOS реальное блокирование требует прав администратора и доступ к `pfctl`.
 
 ## Usage
 
