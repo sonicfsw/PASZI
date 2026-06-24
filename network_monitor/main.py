@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QApplication
 from gui import MainWindow
 
 def main():
+    # Без sudo интерфейс запустится, но реальная блокировка через pfctl будет недоступна.
     if os.geteuid() != 0:
         print("WARNING: Для реального блокирования сетевых соединений приложение нужно запускать с sudo.")
     app = QApplication(sys.argv)

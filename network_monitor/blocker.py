@@ -5,10 +5,13 @@
 """
 
 import os
+import ipaddress
 import socket
 import subprocess
 import shutil
 from urllib.parse import urlparse
+
+import psutil
 
 
 class ConnectionBlocker:
@@ -39,7 +42,7 @@ class ConnectionBlocker:
                         "Добавьте в /etc/pf.conf строку: anchor \"com.network_monitor\" "
                         "и перезагрузите PF: sudo pfctl -f /etc/pf.conf"
                     )
-            except subprocess.CalledProcessError as error:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 print("Ошибка pfctl: {}".format(error))
         else:
             if not self.pfctl_path:
@@ -47,13 +50,15 @@ class ConnectionBlocker:
             elif os.geteuid() != 0:
                 print("Запустите приложение с правами администратора (sudo) для реального блокирования.")
 
-    def _run_command(self, command, input_text=None):
+    def _run_command(self, command, input_text=None, timeout=5):
+        # Таймаут не дает GUI зависнуть, если pfctl отвечает слишком долго.
         result = subprocess.run(
             command,
             input=input_text,
             text=True,
             capture_output=True,
             check=True,
+            timeout=timeout,
         )
         return result.stdout.strip()
 
@@ -88,22 +93,35 @@ class ConnectionBlocker:
         ]
         return any(probe in rules for probe in probes)
 
-    def _parse_remote_addr(self, remote_addr):
-        if not remote_addr:
-            raise ValueError("remote_addr is empty")
+    def _parse_addr(self, addr, label):
+        if not addr:
+            raise ValueError(f"{label} is empty")
 
         # Формат из GUI/monitor обычно x.x.x.x:port
-        if remote_addr.count(":") == 1:
-            ip, port_text = remote_addr.rsplit(":", 1)
+        if addr.count(":") == 1:
+            ip, port_text = addr.rsplit(":", 1)
             return ip, int(port_text)
 
         # Поддержка IPv6 с портом, если встретится формат [::1]:443
-        if remote_addr.startswith("[") and "]:" in remote_addr:
-            host, port_text = remote_addr[1:].split("]:", 1)
+        if addr.startswith("[") and "]:" in addr:
+            host, port_text = addr[1:].split("]:", 1)
             return host, int(port_text)
 
-        # Если порт не распознан, блокируем только IP
-        return remote_addr, None
+        # Если порт не распознан, возвращаем только IP
+        return addr, None
+
+    def _parse_remote_addr(self, remote_addr):
+        return self._parse_addr(remote_addr, "remote_addr")
+
+    def _parse_local_addr(self, local_addr):
+        if not local_addr:
+            return None
+
+        try:
+            ip, _ = self._parse_addr(local_addr, "local_addr")
+        except ValueError:
+            return None
+        return ip
 
     def _normalize_url(self, url):
         raw = (url or "").strip()
@@ -145,14 +163,63 @@ class ConnectionBlocker:
                 return True
         return False
 
-    def _apply_pf_add(self, ip):
+    def _get_local_interface_ips(self, version):
+        local_ips = []
+        seen = set()
+        try:
+            for addresses in psutil.net_if_addrs().values():
+                for address in addresses:
+                    if address.family not in (socket.AF_INET, socket.AF_INET6):
+                        continue
+                    candidate = address.address.split("%", 1)[0]
+                    try:
+                        parsed = ipaddress.ip_address(candidate)
+                    except ValueError:
+                        continue
+                    if parsed.version == version and candidate not in seen:
+                        local_ips.append(candidate)
+                        seen.add(candidate)
+        except (psutil.Error, OSError):
+            return []
+        return local_ips
+
+    def _apply_pf_add(self, ip, local_ip=None):
         if not self.real_blocking_enabled:
             print(f"Симуляция блокировки: {ip}")
             return
         self._run_command([self.pfctl_path, "-a", self.anchor_name, "-t", self.table_name, "-T", "add", ip])
-        # Удаляем активные состояния, чтобы блок сработал сразу для уже открытых сессий.
-        self._run_command([self.pfctl_path, "-k", ip])
+        self._expire_pf_states(ip, local_ip)
         print(f"Реально блокировано: {ip}")
+
+    def _expire_pf_states(self, ip, local_ip=None):
+        # Уже открытые TCP-соединения живут в state table PF. Поэтому после добавления
+        # IP в блок-лист нужно удалить состояния и в направлении local -> remote тоже.
+        parsed_ip = ipaddress.ip_address(ip)
+        any_host = "::/0" if parsed_ip.version == 6 else "0.0.0.0/0"
+        local_ips = []
+        if local_ip:
+            try:
+                parsed_local = ipaddress.ip_address(local_ip)
+                if parsed_local.version == parsed_ip.version:
+                    local_ips.append(local_ip)
+            except ValueError:
+                pass
+
+        for candidate in self._get_local_interface_ips(parsed_ip.version):
+            if candidate not in local_ips:
+                local_ips.append(candidate)
+
+        commands = [[self.pfctl_path, "-k", ip]]
+        for candidate in local_ips:
+            commands.append([self.pfctl_path, "-k", candidate, "-k", ip])
+            commands.append([self.pfctl_path, "-k", ip, "-k", candidate])
+        commands.append([self.pfctl_path, "-k", any_host, "-k", ip])
+
+        for command in commands:
+            try:
+                self._run_command(command)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                print(f"Не удалось сбросить PF-состояния для {ip}: {error}")
 
     def _apply_pf_delete(self, ip):
         if not self.real_blocking_enabled:
@@ -161,13 +228,16 @@ class ConnectionBlocker:
         self._run_command([self.pfctl_path, "-a", self.anchor_name, "-t", self.table_name, "-T", "delete", ip])
         print(f"Реально разблокировано: {ip}")
 
-    def _register_block(self, source, source_value, ip, port=None):
+    def _register_block(self, source, source_value, ip, port=None, local_ip=None):
         if self._entry_exists(source, source_value, ip, port):
             return None
 
+        # Один IP может быть добавлен из разных источников, удаляем его только после последней записи.
         ip_ref = self._ip_ref_counts.get(ip, 0)
         if ip_ref == 0:
-            self._apply_pf_add(ip)
+            self._apply_pf_add(ip, local_ip)
+        elif self.real_blocking_enabled:
+            self._expire_pf_states(ip, local_ip)
         self._ip_ref_counts[ip] = ip_ref + 1
 
         entry = {
@@ -189,12 +259,13 @@ class ConnectionBlocker:
 
         try:
             ip, port = self._parse_remote_addr(remote_addr)
-            return self._register_block("connection", remote_addr, ip, port)
+            local_ip = self._parse_local_addr(conn.get("local_addr", ""))
+            return self._register_block("connection", remote_addr, ip, port, local_ip)
         except ValueError as error:
             print(str(error))
             return None
-        except subprocess.CalledProcessError as error:
-            stderr = error.stderr.strip() if error.stderr else str(error)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            stderr = error.stderr.strip() if getattr(error, "stderr", None) else str(error)
             print(f"Не удалось заблокировать {remote_addr}: {stderr}")
             return None
 
@@ -212,8 +283,8 @@ class ConnectionBlocker:
                 entry = self._register_block("url", source_value, ip, parsed_port)
                 if entry:
                     added_entries.append(entry)
-            except subprocess.CalledProcessError as error:
-                stderr = error.stderr.strip() if error.stderr else str(error)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                stderr = error.stderr.strip() if getattr(error, "stderr", None) else str(error)
                 errors.append(f"{ip}: {stderr}")
 
         if errors:
@@ -237,8 +308,8 @@ class ConnectionBlocker:
         if current_ref <= 1:
             try:
                 self._apply_pf_delete(ip)
-            except subprocess.CalledProcessError as error:
-                stderr = error.stderr.strip() if error.stderr else str(error)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                stderr = error.stderr.strip() if getattr(error, "stderr", None) else str(error)
                 return False, f"Не удалось разблокировать {ip}: {stderr}"
             self._ip_ref_counts.pop(ip, None)
         else:

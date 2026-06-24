@@ -73,5 +73,50 @@ class TestConnectionBlocker(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual(blocker.get_blocked_entries(), [])
 
+    @patch("blocker.shutil.which", return_value="/usr/sbin/pfctl")
+    @patch("blocker.os.geteuid", return_value=0)
+    @patch.object(ConnectionBlocker, "_run_command")
+    @patch.object(ConnectionBlocker, "_get_local_interface_ips", return_value=[])
+    def test_real_block_kills_existing_states_in_both_directions(
+        self, mock_local_ips, mock_run_command, mock_geteuid, mock_which
+    ):
+        mock_run_command.side_effect = lambda command, input_text=None, timeout=5: (
+            "Status: Enabled" if command == ["/usr/sbin/pfctl", "-s", "info"]
+            else 'anchor "com.network_monitor"' if command == ["/usr/sbin/pfctl", "-s", "rules"]
+            else ""
+        )
+
+        blocker = ConnectionBlocker()
+        blocker.block_connection({"local_addr": "192.168.1.10:52133", "remote_addr": "50.7.157.234:443"})
+
+        commands = [call.args[0] for call in mock_run_command.call_args_list]
+        self.assertIn(
+            ["/usr/sbin/pfctl", "-a", "com.network_monitor", "-t", "nm_blocked_hosts", "-T", "add", "50.7.157.234"],
+            commands,
+        )
+        self.assertIn(["/usr/sbin/pfctl", "-k", "50.7.157.234"], commands)
+        self.assertIn(["/usr/sbin/pfctl", "-k", "192.168.1.10", "-k", "50.7.157.234"], commands)
+        self.assertIn(["/usr/sbin/pfctl", "-k", "50.7.157.234", "-k", "192.168.1.10"], commands)
+        self.assertIn(["/usr/sbin/pfctl", "-k", "0.0.0.0/0", "-k", "50.7.157.234"], commands)
+
+    @patch("blocker.shutil.which", return_value="/usr/sbin/pfctl")
+    @patch("blocker.os.geteuid", return_value=0)
+    @patch.object(ConnectionBlocker, "_run_command")
+    @patch.object(ConnectionBlocker, "_get_local_interface_ips", return_value=["192.168.1.10"])
+    def test_real_block_uses_interface_ips_when_connection_has_no_local_addr(
+        self, mock_local_ips, mock_run_command, mock_geteuid, mock_which
+    ):
+        mock_run_command.side_effect = lambda command, input_text=None, timeout=5: (
+            "Status: Enabled" if command == ["/usr/sbin/pfctl", "-s", "info"]
+            else 'anchor "com.network_monitor"' if command == ["/usr/sbin/pfctl", "-s", "rules"]
+            else ""
+        )
+
+        blocker = ConnectionBlocker()
+        blocker.block_connection({"remote_addr": "50.7.157.234:443"})
+
+        commands = [call.args[0] for call in mock_run_command.call_args_list]
+        self.assertIn(["/usr/sbin/pfctl", "-k", "192.168.1.10", "-k", "50.7.157.234"], commands)
+
 if __name__ == "__main__":
     unittest.main()

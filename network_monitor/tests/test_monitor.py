@@ -68,5 +68,49 @@ class TestNetworkMonitor(unittest.TestCase):
 
         self.assertEqual(len(suspicious), 0)
 
+    @patch("monitor.psutil.net_connections")
+    @patch("monitor.psutil.Process")
+    @patch.object(NetworkMonitor, "_resolve_remote_domain", return_value="example.com")
+    def test_skips_dns_resolution_by_default(self, mock_resolve_domain, mock_process, mock_net_connections):
+        monitor = NetworkMonitor()
+        conn = MockConnection(
+            laddr=MockAddr("192.168.1.10", 52345),
+            raddr=MockAddr("93.184.216.34", 443),
+            status="ESTABLISHED",
+            pid=1234,
+            type_="socket"
+        )
+        mock_net_connections.return_value = [conn]
+        mock_proc = MagicMock()
+        mock_proc.name.return_value = "browser"
+        mock_process.return_value = mock_proc
+
+        connections = monitor.get_active_connections()
+
+        self.assertEqual(connections[0]["remote_domain"], "")
+        mock_resolve_domain.assert_not_called()
+
+    @patch("monitor.psutil.net_connections")
+    @patch("monitor.psutil.Process")
+    @patch.object(NetworkMonitor, "_resolve_remote_domain", return_value="example.com")
+    def test_resolves_dns_only_when_requested(self, mock_resolve_domain, mock_process, mock_net_connections):
+        monitor = NetworkMonitor()
+        conn = MockConnection(
+            laddr=MockAddr("192.168.1.10", 52345),
+            raddr=MockAddr("93.184.216.34", 443),
+            status="ESTABLISHED",
+            pid=1234,
+            type_="socket"
+        )
+        mock_net_connections.return_value = [conn]
+        mock_proc = MagicMock()
+        mock_proc.name.return_value = "browser"
+        mock_process.return_value = mock_proc
+
+        connections = monitor.get_active_connections(resolve_domains=True)
+
+        self.assertEqual(connections[0]["remote_domain"], "example.com")
+        mock_resolve_domain.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()

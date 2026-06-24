@@ -1,97 +1,130 @@
-# Network Monitoring and Blocking System
+# Network Monitor
 
-This is a Python-based system for monitoring and blocking network connections on a computer. It provides a graphical user interface for viewing active connections, detecting suspicious activity, and managing network security rules.
+Приложение для просмотра сетевых соединений, поиска подозрительной активности и блокировки IP-адресов на macOS через `pfctl`.
 
-## Features
+## Для пользователя
 
-- **Real-time Network Monitoring**: Displays active network connections with process information
-- **Suspicious Connection Detection**: Identifies potentially dangerous connections based on configurable rules
-- **Process Monitoring**: Shows processes using network resources
-- **Connection Blocking**: Blocks suspicious connections (simulated in this demo version)
-- **Event Logging**: Maintains a log of all monitoring and blocking activities
-- **Graphical Interface**: User-friendly GUI with multiple tabs for different views
+### Что умеет программа
 
-## Requirements
+- показывает активные сетевые соединения;
+- показывает процессы, которые используют сеть;
+- находит подозрительные соединения по портам и IP-адресам;
+- блокирует выбранные соединения вручную;
+- может автоматически блокировать подозрительные соединения;
+- блокирует домены/URL через разрешение домена в IP-адреса;
+- ведет журнал событий в `network_monitor.log`.
 
-- Python 3.7+
-- PyQt5
-- psutil
-- scapy
+### Установка
 
-## Installation
+1. Перейдите в папку проекта:
 
-1. Install dependencies:
+   ```bash
+   cd network_monitor
+   ```
+
+2. Создайте и активируйте виртуальное окружение, если его еще нет:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+3. Установите зависимости:
+
    ```bash
    pip install -r requirements.txt
    ```
 
-2. Run the application:
-   ```bash
-   sudo python3 main.py
+### Запуск
+
+Для просмотра соединений приложение можно запустить обычным способом:
+
+```bash
+python3 main.py
+```
+
+Для реальной блокировки IP-адресов на macOS нужны права администратора:
+
+```bash
+sudo python3 main.py
+```
+
+Если приложение запущено без `sudo`, блокировка будет работать как симуляция: записи появятся в интерфейсе, но firewall не изменится.
+
+### Настройка PF на macOS
+
+Для реальной блокировки в активных правилах PF должен быть подключен anchor приложения.
+
+1. Откройте `/etc/pf.conf` с правами администратора.
+2. Добавьте строку:
+
+   ```pf
+   anchor "com.network_monitor"
    ```
 
-> На macOS реальное блокирование требует прав администратора и доступ к `pfctl`.
+3. Перезагрузите правила PF:
 
-## Usage
+   ```bash
+   sudo pfctl -f /etc/pf.conf
+   ```
 
-1. **Active Connections Tab**: View all current network connections
-2. **Suspicious Connections Tab**: See detected suspicious connections and block them manually
-3. **Processes Tab**: Monitor processes with network activity
-4. **Settings Tab**: Configure detection rules and auto-blocking options
+4. Запустите приложение через `sudo`.
 
-## Security Note
+### Как пользоваться вкладками
 
-This is a demonstration implementation. In a production system, blocking functionality would require system administrator privileges and proper firewall integration. Always test in a safe environment.
+- **Активные соединения**: список текущих соединений, удаленный адрес, PID и имя процесса.
+- **Подозрительные соединения**: соединения, которые совпали с правилами по порту или IP. Здесь можно заблокировать или разрешить выбранную строку.
+- **Процессы**: процессы, у которых есть сетевые соединения.
+- **Параметры**: список подозрительных портов, список подозрительных IP и переключатель автоблокировки.
+- **Заблокированные**: список добавленных блокировок и кнопка снятия блокировки.
 
-## Architecture
+## Для программиста
 
-- `main.py`: Application entry point
-- `gui.py`: PyQt5-based user interface
-- `monitor.py`: Network connection monitoring and suspicious detection
-- `blocker.py`: Connection blocking functionality
-- `logger.py`: Event logging system</content>
-<parameter name="filePath">/Users/sonic_fsw/Documents/PASZI/
+### Структура проекта
 
-Created 8 todos
+- `main.py` — точка входа. Создает `QApplication`, открывает главное окно.
+- `gui.py` — графический интерфейс PyQt5: вкладки, таблицы, таймеры, обработчики кнопок.
+- `monitor.py` — сбор сетевых соединений через `psutil`, проверка правил подозрительности.
+- `blocker.py` — блокировка и разблокировка IP через `pfctl`, хранение списка активных блокировок.
+- `logger.py` — запись событий в `network_monitor.log`.
+- `tests/test_monitor.py` — тесты обнаружения подозрительных соединений и быстрого обхода без DNS.
+- `tests/test_blocker.py` — тесты блокировки, разблокировки и команд PF.
+- `requirements.txt` — зависимости проекта.
 
-Отлично! Я реализовал систему мониторинга и блокирования сетевых соединений в соответствии с требованиями ТЗ. 
+### Основной поток работы
 
-## Реализованное решение
+1. `main.py` запускает окно `MainWindow`.
+2. `MainWindow` создает `NetworkMonitor`, `ConnectionBlocker` и `EventLogger`.
+3. Таймер в `gui.py` каждые 0.5 секунды вызывает `check_suspicious()`.
+4. `NetworkMonitor.get_suspicious_connections()` получает активные соединения и проверяет их по правилам.
+5. Если включена автоблокировка, `ConnectionBlocker.block_connection()` добавляет IP в таблицу PF.
+6. После добавления IP блокировщик сбрасывает существующие PF-состояния, чтобы уже открытые соединения оборвались быстрее.
 
-Проект находится в папке network_monitor и включает:
+### Важные детали реализации
 
-### Архитектура:
-- **main.py** — точка входа приложения
-- **gui.py** — графический интерфейс на PyQt5 с четырьмя вкладками
-- **monitor.py** — модуль анализа активных соединений и обнаружения подозрительной активности
-- **blocker.py** — модуль блокирования сетевых соединений
-- **logger.py** — система логирования всех событий
+- Reverse DNS не выполняется в быстром цикле мониторинга, потому что DNS-запросы могут сильно тормозить интерфейс.
+- Подозрительные порты и IP дополнительно хранятся в `set`, чтобы проверки были быстрыми.
+- Команды `pfctl` запускаются с таймаутом, чтобы приложение не зависало при проблемах firewall.
+- Для исходящих соединений удаленный IP является назначением, поэтому при блокировке сбрасываются PF-состояния в обе стороны.
+- Одинаковые блокировки не добавляются повторно: `ConnectionBlocker` проверяет существующие записи.
 
-### Ключевые возможности:
+### Запуск тестов
 
-1. **Вкладка "Active Connections"** — отображение активных сетевых соединений с информацией о:
-   - Локальном и удаленном адресах
-   - Статусе подключения
-   - PID и названии процесса
-   - Протоколе
+Если зависимости установлены в локальном окружении:
 
-2. **Вкладка "Suspicious Connections"** — обнаружение и управление подозрительными соединениями:
-   - Автоматическое определение подозрительных портов и IP
-   - Кнопки для ручного блокирования/разрешения
-   - Отображение причины подозрительности
+```bash
+python -m unittest discover -s tests
+```
 
-3. **Вкладка "Processes"** — мониторинг процессов, использующих сетевые ресурсы:
-   - PID, название процесса
-   - Процент использования CPU и памяти
+В текущей рабочей структуре тесты также можно запускать через соседнее окружение:
 
-4. **Вкладка "Settings"** — настройка правил обнаружения:
-   - Список подозрительных портов (по умолчанию: 22,23,25,53,80,443,3389)
-   - Список подозрительных IP-адресов
-   - Опция автоматического блокирования
+```bash
+../.venv/bin/python -m unittest discover -s tests
+```
 
-5. **Система логирования** — ведение журнала всех событий мониторинга и блокирования
+### Советы для доработки
 
-Версия Python: 3.12.3  
-Все зависимости установлены и проверены. Проект готов к использованию!
-
-network_monitor/README.md
+- Новые правила обнаружения лучше добавлять в `NetworkMonitor._check_suspicious()`.
+- Новые действия над блокировками лучше добавлять в `ConnectionBlocker`, а GUI должен только вызывать готовые методы.
+- Не выполняйте медленные операции напрямую в частом таймере GUI.
+- Перед изменениями в блокировщике запускайте тесты `tests/test_blocker.py`.

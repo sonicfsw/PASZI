@@ -22,6 +22,7 @@ class MainWindow(QMainWindow):
         self.monitor = NetworkMonitor()
         self.blocker = ConnectionBlocker()
         self.logger = EventLogger()
+        self._checking_suspicious = False
         self.init_ui()
         self.setup_timers()
         self.refresh_blocked_entries()
@@ -213,20 +214,18 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def setup_timers(self):
-        # Таймер для обновления активных соединений
+        # Отдельные таймеры позволяют реже обновлять тяжелые таблицы и чаще искать угрозы.
         self.active_timer = QTimer()
         self.active_timer.timeout.connect(self.refresh_active_connections)
         self.active_timer.start(5000)  # 5 секунд
 
-        # Таймер для обновления информации о процессах
         self.process_timer = QTimer()
         self.process_timer.timeout.connect(self.refresh_processes)
         self.process_timer.start(10000)  # 10 секунд
 
-        # Таймер для проверки подозрительных соединений
         self.monitor_timer = QTimer()
         self.monitor_timer.timeout.connect(self.check_suspicious)
-        self.monitor_timer.start(1000)  # 1 секунда
+        self.monitor_timer.start(500)  # 0.5 секунды
 
     def refresh_active_connections(self, manual=False):
         if not manual and not self.auto_refresh_cb.isChecked():
@@ -263,6 +262,11 @@ class MainWindow(QMainWindow):
             self.log_display.append("ОШИБКА: Нет доступа к информации о процессах. Запустите приложение с правами администратора (sudo).")
 
     def check_suspicious(self):
+        # Если предыдущая проверка еще не закончилась, новую не запускаем.
+        if self._checking_suspicious:
+            return
+
+        self._checking_suspicious = True
         try:
             suspicious = self.monitor.get_suspicious_connections()
             self.suspicious_table.setRowCount(len(suspicious))
@@ -277,15 +281,20 @@ class MainWindow(QMainWindow):
                 self.suspicious_table.setItem(row, 7, QTableWidgetItem(conn.get('reason', '')))
 
             if self.auto_block_cb.isChecked() and suspicious:
+                blocked_any = False
                 for conn in suspicious:
                     entry = self.blocker.block_connection(conn)
                     if entry:
+                        blocked_any = True
                         message = "Автоматически блокировано подозрительное соединение: {}".format(conn)
                         self.logger.log_event(message)
                         self.log_display.append(message)
-                self.refresh_blocked_entries()
+                if blocked_any:
+                    self.refresh_blocked_entries()
         except Exception:
             pass  # Молчаливый отказ, чтобы избежать избыточных сообщений об ошибках
+        finally:
+            self._checking_suspicious = False
 
     def block_selected_suspicious(self):
         # Получаем выбранные строки

@@ -10,6 +10,7 @@ import os
 class EventLogger:
     def __init__(self, log_file="network_monitor.log"):
         self.log_file = log_file
+        # Файл создается один раз, дальше события только дописываются в конец.
         if not os.path.exists(log_file):
             with open(log_file, 'w') as f:
                 f.write("Network Monitor Event Log\n")

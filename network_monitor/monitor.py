@@ -11,31 +11,43 @@ import psutil
 class NetworkMonitor:
     def __init__(self):
         self.suspicious_ports = [22, 23, 25, 53, 80, 443, 3389]  # Порты подозрительной активности по умолчанию
+        # Set нужен для быстрых проверок в частом цикле мониторинга.
+        self._suspicious_ports_set = set(self.suspicious_ports)
         self.suspicious_ips = []  # Может быть обновлено из параметров
+        self._suspicious_ips_set = set(self.suspicious_ips)
         self._dns_cache = {}
         self._dns_ttl_success = 900
         self._dns_ttl_fail = 120
 
     def update_rules(self, ports, ips):
         self.suspicious_ports = [int(p.strip()) for p in ports if p.strip()]
+        self._suspicious_ports_set = set(self.suspicious_ports)
         self.suspicious_ips = [ip.strip() for ip in ips if ip.strip()]
+        self._suspicious_ips_set = set(self.suspicious_ips)
 
-    def get_active_connections(self):
+    def get_active_connections(self, resolve_domains=False):
         connections = []
         now = time.time()
+        # За один проход один PID может встретиться много раз, поэтому имя процесса кэшируется.
+        process_name_cache = {}
         try:
             for conn in psutil.net_connections(kind='inet'):
                 if conn.status == 'ESTABLISHED':
-                    try:
-                        # Получаем информацию о процессе
-                        process = psutil.Process(conn.pid) if conn.pid else None
-                        process_name = process.name() if process else "Unknown"
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        process_name = "Unknown"
+                    process_name = "Unknown"
+                    if conn.pid:
+                        if conn.pid not in process_name_cache:
+                            try:
+                                process_name_cache[conn.pid] = psutil.Process(conn.pid).name()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                process_name_cache[conn.pid] = "Unknown"
+                        process_name = process_name_cache[conn.pid]
 
                     local_addr = "{}:{}".format(conn.laddr.ip, conn.laddr.port) if conn.laddr else ""
                     remote_addr = "{}:{}".format(conn.raddr.ip, conn.raddr.port) if conn.raddr else ""
-                    remote_domain = self._resolve_remote_domain(conn.raddr.ip, now) if conn.raddr else ""
+                    remote_domain = ""
+                    # rDNS медленный, поэтому включается только явно, не в цикле автоблокировки.
+                    if resolve_domains and conn.raddr:
+                        remote_domain = self._resolve_remote_domain(conn.raddr.ip, now)
 
                     connections.append({
                         'local_addr': local_addr,
@@ -93,11 +105,11 @@ class NetworkMonitor:
             return ""
 
         # Проверяем подозрительные порты
-        if remote_port in self.suspicious_ports:
+        if remote_port in self._suspicious_ports_set:
             return "Подозрительный порт: {}".format(remote_port)
 
         # Проверяем подозрительные IP-адреса
-        if remote_ip in self.suspicious_ips:
+        if remote_ip in self._suspicious_ips_set:
             return "Подозрительный IP: {}".format(remote_ip)
 
         # Здесь можно добавить дополнительные проверки
